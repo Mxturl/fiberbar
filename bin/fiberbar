@@ -134,6 +134,7 @@ t() {
     zh:reconnect) print -r -- "重新连接 Fiber SSTP" ;;
     zh:repair) print -r -- "修复内网路由" ;;
     zh:repair_proxy) print -r -- "手动修复系统代理" ;;
+    zh:repair_short) print -r -- "修复" ;;
     zh:auto_repair_proxy) print -r -- "自动修复系统代理" ;;
     zh:diagnose) print -r -- "导出诊断信息" ;;
     zh:toggle) print -r -- "切换连接" ;;
@@ -166,6 +167,7 @@ t() {
       reconnect) print -r -- "Reconnect Fiber SSTP" ;;
       repair) print -r -- "Repair Routes" ;;
       repair_proxy) print -r -- "Manual Repair System Proxy" ;;
+      repair_short) print -r -- "Repair" ;;
       auto_repair_proxy) print -r -- "Auto Repair System Proxy" ;;
       diagnose) print -r -- "Export Diagnostics" ;;
       toggle) print -r -- "Toggle" ;;
@@ -897,32 +899,87 @@ print_config() {
 state_icon_line() {
   local st="$1"
   local h="$2"
+  local sph="${3:-healthy}"
   local label="${FIBERBAR_STATUS_LABEL:-S}"
-  local mark color
+  local vpn_mark proxy_mark color
   case "$h" in
     connected)
-      mark="✓"
+      vpn_mark="✓"
       color="#34C759"
       ;;
     route-mismatch|connected-no-ppp)
-      mark="!"
+      vpn_mark="!"
       color="#FFD60A"
       ;;
     unconfigured)
-      mark="?"
+      vpn_mark="?"
       color="#8E8E93"
       ;;
     *)
       if [[ "$st" == "connected" ]]; then
-        mark="!"
+        vpn_mark="!"
         color="#FFD60A"
       else
-        mark="×"
+        vpn_mark="×"
         color="#FF453A"
       fi
       ;;
   esac
-  print -r -- "$label$mark | color=$color font=Menlo size=13"
+
+  case "$sph" in
+    healthy)
+      proxy_mark="✓"
+      ;;
+    missing-effective|mismatch)
+      proxy_mark="!"
+      [[ "$color" == "#34C759" ]] && color="#FFD60A"
+      ;;
+    unreachable)
+      proxy_mark="×"
+      color="#FF453A"
+      ;;
+    no-target)
+      proxy_mark="?"
+      [[ "$color" == "#34C759" ]] && color="#8E8E93"
+      ;;
+    *)
+      proxy_mark="?"
+      [[ "$color" == "#34C759" ]] && color="#FFD60A"
+      ;;
+  esac
+
+  print -r -- "$label$vpn_mark P$proxy_mark | color=$color font=Menlo size=13"
+}
+
+system_proxy_status_color() {
+  case "$1" in
+    healthy) print -r -- "#34C759" ;;
+    missing-effective|mismatch) print -r -- "#FFD60A" ;;
+    unreachable) print -r -- "#FF453A" ;;
+    *) print -r -- "#8E8E93" ;;
+  esac
+}
+
+system_proxy_status_title() {
+  local sph="$1"
+  local title="$(t system_proxy): $(t "$sph")"
+  if system_proxy_health_repairable "$sph"; then
+    title="$title - $(t repair_short)"
+  fi
+  print -r -- "$title"
+}
+
+print_system_proxy_status_item() {
+  local sph="$1"
+  local helper="$2"
+  local title color
+  title="$(system_proxy_status_title "$sph")"
+  color="$(system_proxy_status_color "$sph")"
+  if system_proxy_health_repairable "$sph"; then
+    print -r -- "$title | bash='$helper' param1=repair-system-proxy terminal=false refresh=true color=$color font=Menlo size=13"
+  else
+    print -r -- "$title | refresh=true color=$color font=Menlo size=13"
+  fi
 }
 
 menu() {
@@ -936,7 +993,7 @@ menu() {
   fi
   helper="$(script_path)"
 
-  state_icon_line "$st" "$h"
+  state_icon_line "$st" "$h" "$sph"
   print -r -- "---"
 
   if [[ "$h" == "connected" ]]; then
@@ -950,6 +1007,9 @@ menu() {
     print -r -- "$(t connect) | bash='$helper' param1=connect terminal=false refresh=true"
   fi
   print -r -- "---"
+  print_system_proxy_status_item "$sph" "$helper"
+  print -r -- "$(t auto_repair_proxy): $(auto_repair_system_proxy_enabled && t enabled || t disabled) | refresh=true"
+  print -r -- "---"
   print -r -- "$(t status): $(t "$st")"
   print -r -- "$(t health): $(t "$h")"
   print -r -- "$(t profile): $FIBERBAR_PROFILE_NAME"
@@ -957,8 +1017,6 @@ menu() {
     print -r -- "$FIBERBAR_USERNAME@$FIBERBAR_SERVER | disabled=true"
   fi
   print -r -- "$(t passwordless): $(t "$pw")"
-  print -r -- "$(t system_proxy): $(t "$sph")"
-  print -r -- "$(t auto_repair_proxy): $(auto_repair_system_proxy_enabled && t enabled || t disabled)"
 
   print -r -- "---"
   print -r -- "$(t configure) | bash='$helper' param1=configure terminal=true refresh=true"
