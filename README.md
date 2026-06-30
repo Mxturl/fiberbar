@@ -105,17 +105,21 @@ Recommended approaches:
 - For all-traffic proxying, use your proxy client's TUN mode when available.
 - For SSTP access to internal networks, keep SSTP as split tunnel and configure
   explicit routes instead of a default route.
-- Treat FiberBar's `Repair Proxy Fallback` action as a last-resort workaround.
-  It writes `State:/Network/Global/Proxies`, which can be overwritten again by
+- Treat FiberBar's `Manual Repair System Proxy` action as a recovery tool. It
+  writes `State:/Network/Global/Proxies`, which can be overwritten again by
   macOS on the next network-state update.
 
-FiberBar never assumes Clash Verge or a fixed proxy port. If you opt in to the
-fallback, configure the proxy target explicitly or let FiberBar discover it from
-the active macOS network services. Automatic fallback is disabled by default:
+FiberBar never assumes Clash Verge or a fixed proxy port. It discovers the proxy
+target from macOS network services, or you can configure one explicitly.
+Automatic repair is disabled by default:
 
 ```sh
-FIBERBAR_PROXY_FALLBACK_ON_CONNECT="false"
+FIBERBAR_AUTO_REPAIR_SYSTEM_PROXY="false"
 ```
+
+When enabled, automatic repair first checks the effective system proxy state and
+only writes `State:/Network/Global/Proxies` if the proxy is missing or
+mismatched. It does not rewrite the system proxy while the status is healthy.
 
 For expert troubleshooting, run:
 

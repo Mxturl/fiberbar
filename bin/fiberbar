@@ -52,6 +52,8 @@ FIBERBAR_SYSTEM_PROXY_HOST=""
 FIBERBAR_SYSTEM_PROXY_PORT=""
 FIBERBAR_REFRESH_SYSTEM_PROXY_ON_CONNECT="false"
 FIBERBAR_PROXY_FALLBACK_ON_CONNECT="false"
+FIBERBAR_AUTO_REPAIR_SYSTEM_PROXY="false"
+FIBERBAR_AUTO_REPAIR_SYSTEM_PROXY_MIN_INTERVAL="60"
 FIBERBAR_EXTRA_PPP_OPTIONS=()
 FIBERBAR_EXTRA_SSTPC_OPTIONS=()
 
@@ -112,10 +114,13 @@ FIBERBAR_ROOT_HELPER="/usr/local/sbin/fiberbar-root"
 FIBERBAR_SUDOERS_FILE="/etc/sudoers.d/fiberbar"
 FIBERBAR_SYSTEM_PROXY_HOST=""
 FIBERBAR_SYSTEM_PROXY_PORT=""
-# Fallback only. Prefer keeping SSTP as split tunnel or using your proxy
-# client's TUN mode instead of writing State:/Network/Global/Proxies.
+# Auto repair is opt-in and only runs when effective system proxy state is
+# missing or mismatched. Prefer keeping SSTP as split tunnel or using your
+# proxy client's TUN mode when possible.
 FIBERBAR_REFRESH_SYSTEM_PROXY_ON_CONNECT="false"
 FIBERBAR_PROXY_FALLBACK_ON_CONNECT="false"
+FIBERBAR_AUTO_REPAIR_SYSTEM_PROXY="false"
+FIBERBAR_AUTO_REPAIR_SYSTEM_PROXY_MIN_INTERVAL="60"
 FIBERBAR_EXTRA_SSTPC_OPTIONS=()
 FIBERBAR_EXTRA_PPP_OPTIONS=()
 EOF
@@ -128,7 +133,8 @@ t() {
     zh:disconnect) print -r -- "断开 Fiber SSTP" ;;
     zh:reconnect) print -r -- "重新连接 Fiber SSTP" ;;
     zh:repair) print -r -- "修复内网路由" ;;
-    zh:refresh_proxy) print -r -- "兜底修复系统代理" ;;
+    zh:repair_proxy) print -r -- "手动修复系统代理" ;;
+    zh:auto_repair_proxy) print -r -- "自动修复系统代理" ;;
     zh:diagnose) print -r -- "导出诊断信息" ;;
     zh:toggle) print -r -- "切换连接" ;;
     zh:status) print -r -- "状态" ;;
@@ -159,7 +165,8 @@ t() {
       disconnect) print -r -- "Disconnect Fiber SSTP" ;;
       reconnect) print -r -- "Reconnect Fiber SSTP" ;;
       repair) print -r -- "Repair Routes" ;;
-      refresh_proxy) print -r -- "Repair Proxy Fallback" ;;
+      repair_proxy) print -r -- "Manual Repair System Proxy" ;;
+      auto_repair_proxy) print -r -- "Auto Repair System Proxy" ;;
       diagnose) print -r -- "Export Diagnostics" ;;
       toggle) print -r -- "Toggle" ;;
       status) print -r -- "Status" ;;
@@ -308,14 +315,42 @@ ensure_routes() {
     replace_route "$route" "$iface"
   done
   log "routes installed on $iface: ${FIBERBAR_ROUTES[*]}"
-  if proxy_fallback_on_connect; then
-    refresh_system_proxy_root
+  if auto_repair_system_proxy_enabled; then
+    auto_repair_system_proxy_root connect
   fi
   print -r -- "$APP_NAME routes installed on $iface"
 }
 
-proxy_fallback_on_connect() {
-  [[ "$FIBERBAR_PROXY_FALLBACK_ON_CONNECT" == "true" || "$FIBERBAR_REFRESH_SYSTEM_PROXY_ON_CONNECT" == "true" ]]
+auto_repair_system_proxy_enabled() {
+  [[ "$FIBERBAR_AUTO_REPAIR_SYSTEM_PROXY" == "true" || "$FIBERBAR_PROXY_FALLBACK_ON_CONNECT" == "true" || "$FIBERBAR_REFRESH_SYSTEM_PROXY_ON_CONNECT" == "true" ]]
+}
+
+system_proxy_health_repairable() {
+  case "$1" in
+    missing-effective|mismatch) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+auto_repair_stamp_file() {
+  print -r -- "$STATE_DIR/system-proxy-auto-repair.stamp"
+}
+
+recent_auto_repair_attempt() {
+  ensure_dirs
+  local stamp now last min_interval
+  stamp="$(auto_repair_stamp_file)"
+  [[ -f "$stamp" ]] || return 1
+  now="$(/bin/date +%s)"
+  last="$(/bin/cat "$stamp" 2>/dev/null || print -r -- 0)"
+  min_interval="${FIBERBAR_AUTO_REPAIR_SYSTEM_PROXY_MIN_INTERVAL:-60}"
+  [[ "$last" == <-> && "$min_interval" == <-> ]] || return 1
+  (( now - last < min_interval ))
+}
+
+mark_auto_repair_attempt() {
+  ensure_dirs
+  /bin/date +%s > "$(auto_repair_stamp_file)"
 }
 
 primary_service_id() {
@@ -446,12 +481,46 @@ d.add FTPPassive # 1
 d.add ExceptionsList * 127.0.0.1 localhost "*.local" "<local>"
 set State:/Network/Global/Proxies
 EOF
-  log "published fallback global system proxy $target"
-  print -r -- "$APP_NAME published fallback system proxy $target"
+  log "published repaired global system proxy $target"
+  print -r -- "$APP_NAME repaired system proxy $target"
 }
 
 refresh_system_proxy() {
   run_as_root refresh-system-proxy-root
+}
+
+auto_repair_system_proxy_root() {
+  [[ "$(/usr/bin/id -u)" == "0" ]] || {
+    print -r -- "auto-repair-system-proxy-root must run as root" >&2
+    exit 1
+  }
+  ensure_dirs
+
+  local reason="${1:-auto}"
+  local sph
+  sph="$(system_proxy_health)"
+  if system_proxy_health_repairable "$sph"; then
+    mark_auto_repair_attempt
+    log "auto repair system proxy triggered by $reason: $sph"
+    refresh_system_proxy_root
+  else
+    log "auto repair system proxy skipped by $reason: $sph"
+    print -r -- "$APP_NAME system proxy auto repair skipped: $sph"
+  fi
+}
+
+auto_repair_system_proxy() {
+  run_as_root auto-repair-system-proxy-root "${1:-auto}"
+}
+
+maybe_auto_repair_system_proxy_from_menu() {
+  local sph="$1"
+  auto_repair_system_proxy_enabled || return 1
+  system_proxy_health_repairable "$sph" || return 1
+  recent_auto_repair_attempt && return 1
+  mark_auto_repair_attempt
+  auto_repair_system_proxy menu >/dev/null 2>&1 || true
+  return 0
 }
 
 diagnose() {
@@ -464,7 +533,7 @@ diagnose() {
   print -r -- "Health: $(health)"
   print -r -- "System Proxy Health: $(system_proxy_health)"
   print -r -- "Passwordless: $(passwordless_status)"
-  print -r -- "Proxy Fallback On Connect: $(proxy_fallback_on_connect && print -r -- enabled || print -r -- disabled)"
+  print -r -- "Auto Repair System Proxy: $(auto_repair_system_proxy_enabled && print -r -- enabled || print -r -- disabled)"
   print -r -- "Routes: ${FIBERBAR_ROUTES[*]}"
   print
 
@@ -797,6 +866,18 @@ configure() {
   read -r value
   [[ -z "$value" ]] || append_config_value FIBERBAR_STATUS_LABEL "$value"
 
+  print -rn -- "Auto repair system proxy when missing/mismatched? true/false [$FIBERBAR_AUTO_REPAIR_SYSTEM_PROXY]: "
+  read -r value
+  [[ -z "$value" ]] || append_config_value FIBERBAR_AUTO_REPAIR_SYSTEM_PROXY "$value"
+
+  print -rn -- "System proxy repair host, optional [$FIBERBAR_SYSTEM_PROXY_HOST]: "
+  read -r value
+  [[ -z "$value" ]] || append_config_value FIBERBAR_SYSTEM_PROXY_HOST "$value"
+
+  print -rn -- "System proxy repair port, optional [$FIBERBAR_SYSTEM_PROXY_PORT]: "
+  read -r value
+  [[ -z "$value" ]] || append_config_value FIBERBAR_SYSTEM_PROXY_PORT "$value"
+
   print -rn -- "Store/update password in Keychain now? [y/N]: "
   read -r value
   if [[ "$value" == [Yy]* ]]; then
@@ -850,6 +931,9 @@ menu() {
   h="$(health)"
   pw="$(passwordless_status)"
   sph="$(system_proxy_health)"
+  if [[ "$pw" == "enabled" ]] && maybe_auto_repair_system_proxy_from_menu "$sph"; then
+    sph="$(system_proxy_health)"
+  fi
   helper="$(script_path)"
 
   state_icon_line "$st" "$h"
@@ -874,10 +958,11 @@ menu() {
   fi
   print -r -- "$(t passwordless): $(t "$pw")"
   print -r -- "$(t system_proxy): $(t "$sph")"
+  print -r -- "$(t auto_repair_proxy): $(auto_repair_system_proxy_enabled && t enabled || t disabled)"
 
   print -r -- "---"
   print -r -- "$(t configure) | bash='$helper' param1=configure terminal=true refresh=true"
-  print -r -- "$(t refresh_proxy) | bash='$helper' param1=refresh-system-proxy terminal=false refresh=true tooltip='Fallback: publishes State:/Network/Global/Proxies when macOS dynamic proxy state is missing.'"
+  print -r -- "$(t repair_proxy) | bash='$helper' param1=repair-system-proxy terminal=false refresh=true tooltip='Publishes State:/Network/Global/Proxies from the configured or discovered proxy target.'"
   print -r -- "$(t diagnose) | bash='$helper' param1=diagnose terminal=true"
   print -r -- "$(t set_password) | bash='$helper' param1=set-password terminal=true refresh=true"
   print -r -- "$(t switch_language) | bash='$helper' param1=toggle-language terminal=false refresh=true"
@@ -918,8 +1003,10 @@ main() {
     disconnect-root) disconnect_root ;;
     repair-routes) repair_routes ;;
     ensure-routes) ensure_routes ;;
+    repair-system-proxy) refresh_system_proxy ;;
     refresh-system-proxy) refresh_system_proxy ;;
     refresh-system-proxy-root) refresh_system_proxy_root ;;
+    auto-repair-system-proxy-root) shift || true; auto_repair_system_proxy_root "${1:-auto}" ;;
     diagnose) diagnose ;;
     reconnect) reconnect ;;
     toggle) toggle ;;
@@ -934,7 +1021,7 @@ main() {
     install-swiftbar-plugin) shift || true; install_swiftbar_plugin "${1:-}" ;;
     log) show_log ;;
     *)
-      print -r -- "Usage: fiberbar {menu|connect|disconnect|reconnect|repair-routes|configure|set-password|install-helper|status|health|diagnose|log}" >&2
+      print -r -- "Usage: fiberbar {menu|connect|disconnect|reconnect|repair-routes|repair-system-proxy|configure|set-password|install-helper|status|health|diagnose|log}" >&2
       exit 2
       ;;
   esac
