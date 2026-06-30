@@ -948,7 +948,7 @@ state_icon_line() {
       ;;
   esac
 
-  print -r -- "$label$vpn_mark P$proxy_mark | color=$color font=Menlo size=13"
+  print -r -- "${label}${vpn_mark}P${proxy_mark} | color=$color font=Menlo size=13"
 }
 
 system_proxy_status_color() {

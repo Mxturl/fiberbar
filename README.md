@@ -9,11 +9,11 @@ small menu bar status item.
 ## Features
 
 - SwiftBar menu bar control for connect, disconnect, reconnect, and route repair.
-- Status on the icon itself:
-  - green `checkmark.shield.fill`: connected and route probe is healthy
-  - yellow `exclamationmark.shield.fill`: process exists but route/PPP health is abnormal
-  - red `xmark.shield.fill`: disconnected
-  - gray `gearshape.fill`: not configured
+- Compact menu bar status, for example `S✓P✓`:
+  - `S` is SSTP health; `P` is effective macOS system proxy health.
+  - `✓` means healthy, `!` means attention/repairable, `×` means disconnected
+    or unreachable, and `?` means not configured or not discovered.
+  - The title color follows the most urgent state: green, yellow, red, or gray.
 - English by default, with Chinese menu text available from the menu.
 - User-configurable SSTP server, username, routes, probe host, CA file, and menu label.
 - Password storage via macOS Keychain.
