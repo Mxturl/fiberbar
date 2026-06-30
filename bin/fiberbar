@@ -1,0 +1,710 @@
+#!/bin/zsh
+set -euo pipefail
+
+APP_NAME="FiberBar"
+DEFAULT_ROOT_HELPER="/usr/local/sbin/fiberbar-root"
+
+current_user() {
+  if [[ -n "${FIBERBAR_USER:-}" ]]; then
+    print -r -- "$FIBERBAR_USER"
+  elif [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+    print -r -- "$SUDO_USER"
+  else
+    /usr/bin/id -un
+  fi
+}
+
+home_for_user() {
+  local user="$1"
+  if [[ -n "${FIBERBAR_HOME:-}" ]]; then
+    print -r -- "$FIBERBAR_HOME"
+  elif [[ "$user" == "$(/usr/bin/id -un)" ]]; then
+    print -r -- "$HOME"
+  else
+    /usr/bin/dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2; exit}'
+  fi
+}
+
+LOGIN_USER="$(current_user)"
+USER_HOME="$(home_for_user "$LOGIN_USER")"
+[[ -n "$USER_HOME" ]] || USER_HOME="/Users/$LOGIN_USER"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$USER_HOME/.config}/fiberbar"
+CONFIG_FILE="${FIBERBAR_CONFIG:-$CONFIG_DIR/config}"
+STATE_DIR="$USER_HOME/Library/Application Support/FiberBar"
+LOG_DIR="$USER_HOME/Library/Logs/FiberBar"
+LOG_FILE="$LOG_DIR/fiberbar.log"
+PID_FILE="$STATE_DIR/fiberbar.pid"
+
+FIBERBAR_PROFILE_NAME="SSTP"
+FIBERBAR_LANGUAGE="en"
+FIBERBAR_SERVER=""
+FIBERBAR_USERNAME=""
+FIBERBAR_KEYCHAIN_SERVICE="FiberBar SSTP VPN"
+FIBERBAR_ROUTES=("10.0.0.0/8")
+FIBERBAR_PROBE_HOST="10.0.0.34"
+FIBERBAR_CA_FILE="$USER_HOME/.fiberbar-ca.pem"
+FIBERBAR_SSTPC="/opt/homebrew/sbin/sstpc"
+FIBERBAR_STATUS_LABEL="VPN"
+FIBERBAR_ROOT_HELPER="$DEFAULT_ROOT_HELPER"
+FIBERBAR_SUDOERS_FILE="/etc/sudoers.d/fiberbar"
+FIBERBAR_EXTRA_PPP_OPTIONS=()
+FIBERBAR_EXTRA_SSTPC_OPTIONS=()
+
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    source "$CONFIG_FILE"
+  fi
+}
+
+ensure_dirs() {
+  /bin/mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
+}
+
+quote_value() {
+  printf "%q" "$1"
+}
+
+append_config_value() {
+  ensure_dirs
+  local key="$1"
+  local value="$2"
+  print -r -- "$key=$(quote_value "$value")" >> "$CONFIG_FILE"
+}
+
+append_config_array() {
+  ensure_dirs
+  local key="$1"
+  shift
+  local line="$key=("
+  local item
+  for item in "$@"; do
+    line+=" $(quote_value "$item")"
+  done
+  line+=" )"
+  print -r -- "$line" >> "$CONFIG_FILE"
+}
+
+create_default_config() {
+  ensure_dirs
+  if [[ -f "$CONFIG_FILE" ]]; then
+    return 0
+  fi
+  /bin/cat > "$CONFIG_FILE" <<'EOF'
+# FiberBar configuration.
+# Passwords are stored in macOS Keychain, not in this file.
+
+FIBERBAR_PROFILE_NAME="SSTP"
+FIBERBAR_LANGUAGE="en"
+FIBERBAR_SERVER=""
+FIBERBAR_USERNAME=""
+FIBERBAR_KEYCHAIN_SERVICE="FiberBar SSTP VPN"
+FIBERBAR_ROUTES=("10.0.0.0/8")
+FIBERBAR_PROBE_HOST="10.0.0.34"
+FIBERBAR_CA_FILE="$USER_HOME/.fiberbar-ca.pem"
+FIBERBAR_SSTPC="/opt/homebrew/sbin/sstpc"
+FIBERBAR_STATUS_LABEL="VPN"
+FIBERBAR_ROOT_HELPER="/usr/local/sbin/fiberbar-root"
+FIBERBAR_SUDOERS_FILE="/etc/sudoers.d/fiberbar"
+FIBERBAR_EXTRA_SSTPC_OPTIONS=()
+FIBERBAR_EXTRA_PPP_OPTIONS=()
+EOF
+}
+
+t() {
+  local key="$1"
+  case "$FIBERBAR_LANGUAGE:$key" in
+    zh:connect) print -r -- "连接 Fiber SSTP" ;;
+    zh:disconnect) print -r -- "断开 Fiber SSTP" ;;
+    zh:reconnect) print -r -- "重新连接 Fiber SSTP" ;;
+    zh:repair) print -r -- "修复内网路由" ;;
+    zh:toggle) print -r -- "切换连接" ;;
+    zh:status) print -r -- "状态" ;;
+    zh:health) print -r -- "健康状态" ;;
+    zh:profile) print -r -- "配置" ;;
+    zh:passwordless) print -r -- "免密码控制" ;;
+    zh:enable_passwordless) print -r -- "启用免密码控制" ;;
+    zh:configure) print -r -- "配置服务器/用户/路由" ;;
+    zh:set_password) print -r -- "设置密码到钥匙串" ;;
+    zh:switch_language) print -r -- "Switch to English" ;;
+    zh:show_log) print -r -- "查看日志" ;;
+    zh:refresh) print -r -- "刷新" ;;
+    zh:missing_config) print -r -- "请先配置 SSTP 服务器和用户名。" ;;
+    zh:connected) print -r -- "已连接" ;;
+    zh:disconnected) print -r -- "已断开" ;;
+    zh:route-mismatch) print -r -- "路由异常" ;;
+    zh:connected-no-ppp) print -r -- "无 PPP 接口" ;;
+    zh:enabled) print -r -- "已启用" ;;
+    zh:disabled) print -r -- "未启用" ;;
+    *) case "$key" in
+      connect) print -r -- "Connect Fiber SSTP" ;;
+      disconnect) print -r -- "Disconnect Fiber SSTP" ;;
+      reconnect) print -r -- "Reconnect Fiber SSTP" ;;
+      repair) print -r -- "Repair Routes" ;;
+      toggle) print -r -- "Toggle" ;;
+      status) print -r -- "Status" ;;
+      health) print -r -- "Health" ;;
+      profile) print -r -- "Profile" ;;
+      passwordless) print -r -- "Passwordless" ;;
+      enable_passwordless) print -r -- "Enable Passwordless Control" ;;
+      configure) print -r -- "Configure Server/User/Routes" ;;
+      set_password) print -r -- "Set Password in Keychain" ;;
+      switch_language) print -r -- "切换到中文" ;;
+      show_log) print -r -- "Show Log" ;;
+      refresh) print -r -- "Refresh" ;;
+      missing_config) print -r -- "Configure an SSTP server and username first." ;;
+      connected) print -r -- "connected" ;;
+      disconnected) print -r -- "disconnected" ;;
+      route-mismatch) print -r -- "route mismatch" ;;
+      connected-no-ppp) print -r -- "no PPP interface" ;;
+      enabled) print -r -- "enabled" ;;
+      disabled) print -r -- "disabled" ;;
+      *) print -r -- "$key" ;;
+    esac ;;
+  esac
+}
+
+log() {
+  ensure_dirs
+  print -r -- "[$(/bin/date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
+}
+
+validate_config() {
+  if [[ -z "$FIBERBAR_SERVER" || -z "$FIBERBAR_USERNAME" ]]; then
+    t missing_config >&2
+    return 1
+  fi
+}
+
+process_pids() {
+  if [[ -n "$FIBERBAR_SERVER" ]]; then
+    /usr/bin/pgrep -f "$FIBERBAR_SSTPC.*$FIBERBAR_SERVER" 2>/dev/null || true
+  fi
+  /usr/bin/pgrep -f "ipparam fiberbar" 2>/dev/null || true
+  /usr/bin/pgrep -f "ipparam fiber-sstp" 2>/dev/null || true
+}
+
+status() {
+  validate_config >/dev/null 2>&1 || {
+    print -r -- "unconfigured"
+    return 0
+  }
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid="$(/bin/cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && /bin/kill -0 "$pid" 2>/dev/null; then
+      print -r -- "connected"
+      return 0
+    fi
+  fi
+  if process_pids | /usr/bin/grep -q '[0-9]'; then
+    print -r -- "connected"
+  else
+    print -r -- "disconnected"
+  fi
+}
+
+ppp_iface() {
+  /sbin/ifconfig | /usr/bin/awk -F: '/^ppp[0-9]+:/{print $1}' | /usr/bin/tail -n 1
+}
+
+route_iface() {
+  /sbin/route -n get "$1" 2>/dev/null | /usr/bin/awk -F: '/interface:/{gsub(/^[ \t]+/, "", $2); print $2; exit}'
+}
+
+health() {
+  local st
+  st="$(status)"
+  if [[ "$st" != "connected" ]]; then
+    print -r -- "$st"
+    return 0
+  fi
+
+  local iface
+  iface="$(ppp_iface)"
+  if [[ -z "$iface" ]]; then
+    print -r -- "connected-no-ppp"
+    return 0
+  fi
+
+  local probe_iface
+  probe_iface="$(route_iface "$FIBERBAR_PROBE_HOST")"
+  if [[ "$probe_iface" == "$iface" ]]; then
+    print -r -- "connected"
+  else
+    print -r -- "route-mismatch"
+  fi
+}
+
+add_route() {
+  local route="$1"
+  local iface="$2"
+  if [[ "$route" == */32 ]]; then
+    /sbin/route -n add -host "${route%/32}" -interface "$iface" >> "$LOG_FILE" 2>&1 || true
+  else
+    /sbin/route -n add -net "$route" -interface "$iface" >> "$LOG_FILE" 2>&1 || true
+  fi
+}
+
+delete_route() {
+  local route="$1"
+  if [[ "$route" == */32 ]]; then
+    /sbin/route -n delete -host "${route%/32}" >> "$LOG_FILE" 2>&1 || true
+  else
+    /sbin/route -n delete -net "$route" >> "$LOG_FILE" 2>&1 || true
+  fi
+}
+
+replace_route() {
+  local route="$1"
+  local iface="$2"
+  delete_route "$route"
+  add_route "$route" "$iface"
+}
+
+ensure_routes() {
+  [[ "$(/usr/bin/id -u)" == "0" ]] || {
+    print -r -- "ensure-routes must run as root" >&2
+    exit 1
+  }
+  validate_config
+  ensure_dirs
+
+  local iface
+  iface="$(ppp_iface)"
+  if [[ -z "$iface" ]]; then
+    print -r -- "$APP_NAME is connected but no PPP interface was found" >&2
+    exit 1
+  fi
+
+  local route
+  for route in "${FIBERBAR_ROUTES[@]}"; do
+    replace_route "$route" "$iface"
+  done
+  log "routes installed on $iface: ${FIBERBAR_ROUTES[*]}"
+  print -r -- "$APP_NAME routes installed on $iface"
+}
+
+password_from_keychain() {
+  /usr/bin/security find-generic-password -a "$FIBERBAR_USERNAME" -s "$FIBERBAR_KEYCHAIN_SERVICE" -w
+}
+
+password() {
+  if [[ -n "${FIBERBAR_PASSWORD:-}" ]]; then
+    print -r -- "$FIBERBAR_PASSWORD"
+    return 0
+  fi
+  if [[ -n "${FIBERBAR_PASSWORD_B64:-}" ]]; then
+    printf '%s' "$FIBERBAR_PASSWORD_B64" | /usr/bin/base64 -D
+    printf '\n'
+    return 0
+  fi
+  password_from_keychain
+}
+
+sudo_env_args() {
+  print -r -- "FIBERBAR_USER=$LOGIN_USER"
+  print -r -- "FIBERBAR_HOME=$USER_HOME"
+  print -r -- "FIBERBAR_CONFIG=$CONFIG_FILE"
+}
+
+passwordless_status() {
+  if [[ -x "$FIBERBAR_ROOT_HELPER" ]] && \
+    FIBERBAR_USER="$LOGIN_USER" FIBERBAR_HOME="$USER_HOME" FIBERBAR_CONFIG="$CONFIG_FILE" \
+    /usr/bin/sudo -n --preserve-env=FIBERBAR_USER,FIBERBAR_HOME,FIBERBAR_CONFIG "$FIBERBAR_ROOT_HELPER" status >/dev/null 2>&1; then
+    print -r -- "enabled"
+  else
+    print -r -- "disabled"
+  fi
+}
+
+script_path() {
+  local src="${(%):-%x}"
+  if [[ "$src" == /* ]]; then
+    print -r -- "$src"
+  else
+    print -r -- "$PWD/$src"
+  fi
+}
+
+install_helper_root() {
+  [[ "$(/usr/bin/id -u)" == "0" ]] || {
+    print -r -- "install-helper-root must run as root" >&2
+    exit 1
+  }
+
+  local source_script="${FIBERBAR_SOURCE_SCRIPT:-$(script_path)}"
+  /bin/mkdir -p "$(/usr/bin/dirname "$FIBERBAR_ROOT_HELPER")"
+  /bin/cp "$source_script" "$FIBERBAR_ROOT_HELPER"
+  /usr/sbin/chown root:wheel "$FIBERBAR_ROOT_HELPER"
+  /bin/chmod 755 "$FIBERBAR_ROOT_HELPER"
+
+  local tmp
+  tmp="$(/usr/bin/mktemp /tmp/fiberbar-sudoers.XXXXXX)"
+  /bin/cat > "$tmp" <<EOF
+$LOGIN_USER ALL=(root) NOPASSWD:SETENV: $FIBERBAR_ROOT_HELPER *
+EOF
+  /usr/sbin/chown root:wheel "$tmp"
+  /bin/chmod 440 "$tmp"
+  /usr/sbin/visudo -cf "$tmp" >/dev/null
+  /bin/mv "$tmp" "$FIBERBAR_SUDOERS_FILE"
+  /bin/chmod 440 "$FIBERBAR_SUDOERS_FILE"
+  /usr/sbin/visudo -cf "$FIBERBAR_SUDOERS_FILE" >/dev/null
+  print -r -- "$APP_NAME passwordless helper installed"
+}
+
+admin_shell() {
+  local command="$1"
+  /usr/bin/osascript -e "do shell script \"FIBERBAR_USER='$LOGIN_USER' FIBERBAR_HOME='$USER_HOME' FIBERBAR_CONFIG='$CONFIG_FILE' FIBERBAR_SOURCE_SCRIPT='$(script_path)' $command\" with administrator privileges"
+}
+
+install_helper() {
+  admin_shell "'$(script_path)' install-helper-root"
+}
+
+run_as_root() {
+  local action="$1"
+  shift || true
+  if [[ "$(passwordless_status)" == "enabled" ]]; then
+    FIBERBAR_USER="$LOGIN_USER" FIBERBAR_HOME="$USER_HOME" FIBERBAR_CONFIG="$CONFIG_FILE" \
+      /usr/bin/sudo --preserve-env=FIBERBAR_USER,FIBERBAR_HOME,FIBERBAR_CONFIG "$FIBERBAR_ROOT_HELPER" "$action" "$@"
+  else
+    admin_shell "'$(script_path)' $action $*"
+  fi
+}
+
+connect_root() {
+  [[ "$(/usr/bin/id -u)" == "0" ]] || {
+    print -r -- "connect-root must run as root" >&2
+    exit 1
+  }
+  validate_config
+  ensure_dirs
+  if [[ "$(status)" == "connected" ]]; then
+    ensure_routes
+    return 0
+  fi
+
+  local pass
+  pass="$(password)"
+  : > "$LOG_FILE"
+
+  "$FIBERBAR_SSTPC" \
+    "${FIBERBAR_EXTRA_SSTPC_OPTIONS[@]}" \
+    --tls-ext \
+    --ca-cert "$FIBERBAR_CA_FILE" \
+    --user "$FIBERBAR_USERNAME" \
+    --password "$pass" \
+    "$FIBERBAR_SERVER" \
+    -- \
+    noauth \
+    nobsdcomp \
+    nodeflate \
+    noipdefault \
+    nodefaultroute \
+    usepeerdns \
+    logfile "$LOG_FILE" \
+    ipparam fiberbar \
+    "${FIBERBAR_EXTRA_PPP_OPTIONS[@]}" \
+    >> "$LOG_FILE" 2>&1 &
+
+  print -r -- "$!" > "$PID_FILE"
+  log "started sstpc pid $(/bin/cat "$PID_FILE")"
+
+  local iface
+  for _ in {1..20}; do
+    sleep 1
+    iface="$(ppp_iface)"
+    if [[ -n "$iface" ]]; then
+      ensure_routes
+      print -r -- "$APP_NAME connected on $iface"
+      return 0
+    fi
+    [[ "$(status)" == "connected" ]] || break
+  done
+
+  print -r -- "$APP_NAME connection started; waiting for PPP interface. Check $LOG_FILE"
+}
+
+connect() {
+  validate_config
+  local pass pass_b64
+  pass="$(password)"
+  pass_b64="$(printf '%s' "$pass" | /usr/bin/base64)"
+  if [[ "$(passwordless_status)" == "enabled" ]]; then
+    FIBERBAR_USER="$LOGIN_USER" FIBERBAR_HOME="$USER_HOME" FIBERBAR_CONFIG="$CONFIG_FILE" FIBERBAR_PASSWORD_B64="$pass_b64" \
+      /usr/bin/sudo --preserve-env=FIBERBAR_USER,FIBERBAR_HOME,FIBERBAR_CONFIG,FIBERBAR_PASSWORD_B64 "$FIBERBAR_ROOT_HELPER" connect-root
+  else
+    FIBERBAR_PASSWORD_B64="$pass_b64" admin_shell "FIBERBAR_PASSWORD_B64='$pass_b64' '$(script_path)' connect-root"
+  fi
+}
+
+disconnect_root() {
+  [[ "$(/usr/bin/id -u)" == "0" ]] || {
+    print -r -- "disconnect-root must run as root" >&2
+    exit 1
+  }
+  ensure_dirs
+
+  local pids
+  pids="$(process_pids | /usr/bin/sort -u | /usr/bin/tr '\n' ' ')"
+  if [[ -n "$pids" ]]; then
+    /bin/kill $pids 2>/dev/null || true
+    sleep 1
+    pids="$(process_pids | /usr/bin/sort -u | /usr/bin/tr '\n' ' ')"
+    if [[ -n "$pids" ]]; then
+      /bin/kill -9 $pids 2>/dev/null || true
+    fi
+  fi
+
+  local route
+  for route in "${FIBERBAR_ROUTES[@]}"; do
+    delete_route "$route"
+  done
+  /bin/rm -f "$PID_FILE"
+  log "disconnected"
+  print -r -- "$APP_NAME disconnected"
+}
+
+disconnect() {
+  run_as_root disconnect-root
+}
+
+repair_routes() {
+  run_as_root ensure-routes
+}
+
+reconnect() {
+  disconnect
+  connect
+}
+
+toggle() {
+  case "$(status)" in
+    connected) disconnect ;;
+    *) connect ;;
+  esac
+}
+
+set_language() {
+  local lang="$1"
+  case "$lang" in
+    en|zh) append_config_value FIBERBAR_LANGUAGE "$lang" ;;
+    *) print -r -- "Usage: fiberbar set-language {en|zh}" >&2; exit 2 ;;
+  esac
+}
+
+toggle_language() {
+  if [[ "$FIBERBAR_LANGUAGE" == "zh" ]]; then
+    set_language en
+  else
+    set_language zh
+  fi
+}
+
+set_password() {
+  validate_config
+  print -rn -- "Password for $FIBERBAR_USERNAME@$FIBERBAR_SERVER: "
+  stty -echo
+  local pass
+  read -r pass
+  stty echo
+  print
+  [[ -n "$pass" ]] || {
+    print -r -- "Password unchanged."
+    return 0
+  }
+  /usr/bin/security add-generic-password -U -a "$FIBERBAR_USERNAME" -s "$FIBERBAR_KEYCHAIN_SERVICE" -w "$pass" >/dev/null
+  print -r -- "Password saved to Keychain service: $FIBERBAR_KEYCHAIN_SERVICE"
+}
+
+configure() {
+  create_default_config
+  load_config
+  print -r -- "$APP_NAME configuration"
+  print -r -- "Config: $CONFIG_FILE"
+  print -r -- "Press Enter to keep the current value."
+  print
+
+  local value
+  print -rn -- "Profile name [$FIBERBAR_PROFILE_NAME]: "
+  read -r value
+  [[ -z "$value" ]] || append_config_value FIBERBAR_PROFILE_NAME "$value"
+
+  print -rn -- "Language en/zh [$FIBERBAR_LANGUAGE]: "
+  read -r value
+  [[ -z "$value" ]] || set_language "$value"
+
+  print -rn -- "SSTP server host:port [$FIBERBAR_SERVER]: "
+  read -r value
+  [[ -z "$value" ]] || append_config_value FIBERBAR_SERVER "$value"
+
+  print -rn -- "SSTP username [$FIBERBAR_USERNAME]: "
+  read -r value
+  [[ -z "$value" ]] || append_config_value FIBERBAR_USERNAME "$value"
+
+  print -rn -- "Keychain service [$FIBERBAR_KEYCHAIN_SERVICE]: "
+  read -r value
+  [[ -z "$value" ]] || append_config_value FIBERBAR_KEYCHAIN_SERVICE "$value"
+
+  print -rn -- "Routes, space-separated [${FIBERBAR_ROUTES[*]}]: "
+  read -r value
+  if [[ -n "$value" ]]; then
+    local routes
+    routes=("${(@s: :)value}")
+    append_config_array FIBERBAR_ROUTES "${routes[@]}"
+  fi
+
+  print -rn -- "Probe host [$FIBERBAR_PROBE_HOST]: "
+  read -r value
+  [[ -z "$value" ]] || append_config_value FIBERBAR_PROBE_HOST "$value"
+
+  print -rn -- "CA file [$FIBERBAR_CA_FILE]: "
+  read -r value
+  [[ -z "$value" ]] || append_config_value FIBERBAR_CA_FILE "$value"
+
+  print -rn -- "sstpc path [$FIBERBAR_SSTPC]: "
+  read -r value
+  [[ -z "$value" ]] || append_config_value FIBERBAR_SSTPC "$value"
+
+  print -rn -- "Menu label [$FIBERBAR_STATUS_LABEL]: "
+  read -r value
+  [[ -z "$value" ]] || append_config_value FIBERBAR_STATUS_LABEL "$value"
+
+  print -rn -- "Store/update password in Keychain now? [y/N]: "
+  read -r value
+  if [[ "$value" == [Yy]* ]]; then
+    load_config
+    set_password
+  fi
+
+  print -r -- "Saved. Restart or refresh SwiftBar to apply."
+}
+
+print_config() {
+  create_default_config
+  print -r -- "$CONFIG_FILE"
+  /bin/cat "$CONFIG_FILE"
+}
+
+state_icon_line() {
+  local st="$1"
+  local h="$2"
+  local label="${FIBERBAR_STATUS_LABEL:-S}"
+  local mark color
+  case "$h" in
+    connected)
+      mark="✓"
+      color="#34C759"
+      ;;
+    route-mismatch|connected-no-ppp)
+      mark="!"
+      color="#FFD60A"
+      ;;
+    unconfigured)
+      mark="?"
+      color="#8E8E93"
+      ;;
+    *)
+      if [[ "$st" == "connected" ]]; then
+        mark="!"
+        color="#FFD60A"
+      else
+        mark="×"
+        color="#FF453A"
+      fi
+      ;;
+  esac
+  print -r -- "$label$mark | color=$color font=Menlo size=13"
+}
+
+menu() {
+  local st h pw helper
+  st="$(status)"
+  h="$(health)"
+  pw="$(passwordless_status)"
+  helper="$(script_path)"
+
+  state_icon_line "$st" "$h"
+  print -r -- "---"
+
+  if [[ "$h" == "connected" ]]; then
+    print -r -- "$(t disconnect) | bash='$helper' param1=disconnect terminal=false refresh=true"
+    print -r -- "$(t repair) | bash='$helper' param1=repair-routes terminal=false refresh=true"
+  elif [[ "$st" == "connected" ]]; then
+    print -r -- "$(t reconnect) | bash='$helper' param1=reconnect terminal=false refresh=true"
+    print -r -- "$(t disconnect) | bash='$helper' param1=disconnect terminal=false refresh=true"
+    print -r -- "$(t repair) | bash='$helper' param1=repair-routes terminal=false refresh=true"
+  else
+    print -r -- "$(t connect) | bash='$helper' param1=connect terminal=false refresh=true"
+  fi
+  print -r -- "---"
+  print -r -- "$(t status): $(t "$st")"
+  print -r -- "$(t health): $(t "$h")"
+  print -r -- "$(t profile): $FIBERBAR_PROFILE_NAME"
+  if [[ -n "$FIBERBAR_SERVER" && -n "$FIBERBAR_USERNAME" ]]; then
+    print -r -- "$FIBERBAR_USERNAME@$FIBERBAR_SERVER | disabled=true"
+  fi
+  print -r -- "$(t passwordless): $(t "$pw")"
+
+  print -r -- "---"
+  print -r -- "$(t configure) | bash='$helper' param1=configure terminal=true refresh=true"
+  print -r -- "$(t set_password) | bash='$helper' param1=set-password terminal=true refresh=true"
+  print -r -- "$(t switch_language) | bash='$helper' param1=toggle-language terminal=false refresh=true"
+  if [[ "$pw" != "enabled" ]]; then
+    print -r -- "$(t enable_passwordless) | bash='$helper' param1=install-helper terminal=false refresh=true"
+  fi
+  print -r -- "$(t show_log) | bash='$helper' param1=log terminal=true"
+  print -r -- "$(t refresh) | refresh=true"
+}
+
+show_log() {
+  ensure_dirs
+  /usr/bin/tail -n 120 "$LOG_FILE" 2>/dev/null || true
+}
+
+install_swiftbar_plugin() {
+  local plugin_dir="${1:-$USER_HOME/Library/Application Support/SwiftBar/Plugins}"
+  /bin/mkdir -p "$plugin_dir"
+  local plugin="$plugin_dir/fiberbar.5s.sh"
+  /bin/cat > "$plugin" <<EOF
+#!/bin/zsh
+exec "$USER_HOME/bin/fiberbar" menu
+EOF
+  /bin/chmod +x "$plugin"
+  print -r -- "Installed SwiftBar plugin: $plugin"
+}
+
+main() {
+  create_default_config
+  load_config
+  case "${1:-menu}" in
+    menu) menu ;;
+    status) status ;;
+    health) health ;;
+    connect) connect ;;
+    connect-root) connect_root ;;
+    disconnect) disconnect ;;
+    disconnect-root) disconnect_root ;;
+    repair-routes) repair_routes ;;
+    ensure-routes) ensure_routes ;;
+    reconnect) reconnect ;;
+    toggle) toggle ;;
+    configure) configure ;;
+    set-password) set_password ;;
+    set-language) shift; set_language "${1:-}" ;;
+    toggle-language) toggle_language ;;
+    install-helper) install_helper ;;
+    install-helper-root) install_helper_root ;;
+    passwordless-status) passwordless_status ;;
+    print-config) print_config ;;
+    install-swiftbar-plugin) shift || true; install_swiftbar_plugin "${1:-}" ;;
+    log) show_log ;;
+    *)
+      print -r -- "Usage: fiberbar {menu|connect|disconnect|reconnect|repair-routes|configure|set-password|install-helper|status|health|log}" >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
