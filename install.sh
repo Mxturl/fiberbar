@@ -25,6 +25,18 @@ echo "Installed fiberbar to $BIN_DIR/fiberbar"
 echo "Installed SwiftBar plugin to $PLUGIN_DIR/fiberbar.5s.sh"
 echo "Run: $BIN_DIR/fiberbar configure"
 
+if "$BIN_DIR/fiberbar" passwordless-status | grep -q '^enabled$'; then
+  FIBERBAR_USER="$USER" \
+    FIBERBAR_HOME="$HOME" \
+    FIBERBAR_CONFIG="${FIBERBAR_CONFIG:-$HOME/.config/fiberbar/config}" \
+    FIBERBAR_SOURCE_SCRIPT="$BIN_DIR/fiberbar" \
+    sudo --preserve-env=FIBERBAR_USER,FIBERBAR_HOME,FIBERBAR_CONFIG,FIBERBAR_SOURCE_SCRIPT \
+      /usr/local/sbin/fiberbar-root install-helper-root >/dev/null
+  echo "Updated passwordless root helper."
+else
+  echo "Passwordless root helper was not updated. Enable it from the menu if needed."
+fi
+
 if [[ "$ENABLE_AUTOSTART" == "true" ]]; then
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/FiberBar"
   cat > "$HOME/Library/LaunchAgents/com.fiberbar.swiftbar-autostart.plist" <<EOF

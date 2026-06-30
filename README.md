@@ -18,6 +18,7 @@ small menu bar status item.
 - User-configurable SSTP server, username, routes, probe host, CA file, and menu label.
 - Password storage via macOS Keychain.
 - Optional passwordless control through a root-owned helper plus a narrow sudoers rule.
+- System proxy health diagnostics for macOS multi-interface/VPN edge cases.
 
 ## Requirements
 
@@ -85,6 +86,45 @@ You will enter the administrator password once. FiberBar installs:
 
 The sudoers rule only permits the current macOS user to run that root-owned
 helper. Do not make the helper user-writable.
+
+## System Proxy Notes
+
+FiberBar starts `sstpc` with `nodefaultroute` and installs explicit split routes
+for the configured internal networks. This keeps normal internet traffic on the
+primary Wi-Fi/Ethernet service.
+
+On macOS, apps such as Chrome read the effective proxy from
+`State:/Network/Global/Proxies` through SystemConfiguration/CFNetwork. That
+runtime state is synthesized from the current primary service. If a PPP/VPN
+interface becomes primary or triggers a proxy-state recomputation, a proxy that
+still exists in a Wi-Fi service's persistent Setup configuration may only appear
+as a scoped entry and may disappear from the global proxy seen by browsers.
+
+Recommended approaches:
+
+- For all-traffic proxying, use your proxy client's TUN mode when available.
+- For SSTP access to internal networks, keep SSTP as split tunnel and configure
+  explicit routes instead of a default route.
+- Treat FiberBar's `Repair Proxy Fallback` action as a last-resort workaround.
+  It writes `State:/Network/Global/Proxies`, which can be overwritten again by
+  macOS on the next network-state update.
+
+FiberBar never assumes Clash Verge or a fixed proxy port. If you opt in to the
+fallback, configure the proxy target explicitly or let FiberBar discover it from
+the active macOS network services. Automatic fallback is disabled by default:
+
+```sh
+FIBERBAR_PROXY_FALLBACK_ON_CONNECT="false"
+```
+
+For expert troubleshooting, run:
+
+```sh
+fiberbar diagnose
+```
+
+The diagnostic output includes primary service, effective proxy state, route
+selection, PPP status, and redacted process arguments.
 
 ## Why Not a Full GUI App?
 
